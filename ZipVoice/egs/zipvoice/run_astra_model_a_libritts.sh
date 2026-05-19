@@ -8,8 +8,8 @@ set -e
 set -u
 set -o pipefail
 
-stage=1
-stop_stage=3
+stage=${stage:-1}
+stop_stage=${stop_stage:-3}
 world_size=${world_size:-1}
 use_fp16=${use_fp16:-1}
 num_iters=${num_iters:-500000}
