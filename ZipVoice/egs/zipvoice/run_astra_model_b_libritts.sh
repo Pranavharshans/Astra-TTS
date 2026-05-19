@@ -14,7 +14,8 @@ world_size=${world_size:-1}
 use_fp16=${use_fp16:-1}
 num_iters=${num_iters:-500000}
 save_every_n=${save_every_n:-5000}
-max_duration=${max_duration:-100}
+max_duration=${max_duration:-40}
+accum_grad_batches=${accum_grad_batches:-3}
 base_lr=${base_lr:-0.045}
 
 if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
@@ -30,6 +31,7 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
             --num-iters ${num_iters} \
             --save-every-n ${save_every_n} \
             --max-duration ${max_duration} \
+            --accum-grad-batches ${accum_grad_batches} \
             --lr-epochs 10 \
             --base-lr ${base_lr} \
             --max-len 20 \

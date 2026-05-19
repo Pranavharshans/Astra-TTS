@@ -251,6 +251,15 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--accum-grad-batches",
+        type=int,
+        default=1,
+        help="""Number of microbatches to accumulate before each optimizer step.
+        Use values >1 to keep a larger effective batch on lower-memory GPUs.
+        """,
+    )
+
+    parser.add_argument(
         "--valid-by-epoch",
         type=str2bool,
         default=False,
@@ -534,6 +543,7 @@ def train_one_epoch(
     tot_loss = MetricsTracker()
 
     saved_bad_model = False
+    optimizer.zero_grad()
 
     def save_bad_model(suffix: str = ""):
         save_checkpoint(
@@ -556,13 +566,18 @@ def train_one_epoch(
             else:
                 set_batch_count(model, get_adjusted_batch_count(params))
 
-        if (
-            params.valid_by_epoch and batch_idx == 0 and not params.print_diagnostics
-        ) or (
-            not params.valid_by_epoch
-            and params.batch_idx_train % params.valid_interval == 0
-            and not params.print_diagnostics
-        ):
+        if params.batch_idx_train == 0 and batch_idx > 0:
+            should_validate = False
+        else:
+            should_validate = (
+                params.valid_by_epoch and batch_idx == 0 and not params.print_diagnostics
+            ) or (
+                not params.valid_by_epoch
+                and params.batch_idx_train % params.valid_interval == 0
+                and not params.print_diagnostics
+            )
+
+        if should_validate:
             logging.info("Computing validation loss")
             valid_info = compute_validation_loss(
                 params=params,
@@ -583,8 +598,6 @@ def train_one_epoch(
                 valid_info.write_summary(
                     tb_writer, "train/valid_", params.batch_idx_train
                 )
-
-        params.batch_idx_train += 1
 
         batch_size = len(batch["text"])
 
@@ -609,14 +622,22 @@ def train_one_epoch(
 
             tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
 
-            scaler.scale(loss).backward()
+            scaler.scale(loss / params.accum_grad_batches).backward()
+
+            is_accum_step = (batch_idx + 1) % params.accum_grad_batches == 0
+            is_last_batch = batch_idx + 1 == len(train_dl)
+            if not is_accum_step and not is_last_batch:
+                continue
+
+            params.batch_idx_train += 1
 
             scheduler.step_batch(params.batch_idx_train)
-            # Use the number of hours of speech to adjust the learning rate
+            # Use the number of hours of speech to adjust the learning rate.
             if params.lr_hours > 0:
                 scheduler.step_epoch(
                     params.batch_idx_train
                     * params.max_duration
+                    * params.accum_grad_batches
                     * params.world_size
                     / 3600
                 )
@@ -871,6 +892,7 @@ def run(rank, world_size, args):
     """
     params = get_params()
     params.update(vars(args))
+    assert params.accum_grad_batches > 0, params.accum_grad_batches
     params.valid_interval = params.save_every_n
     # Set epoch to a large number to ignore it.
     if params.num_iters > 0:
