@@ -17,6 +17,7 @@ save_every_n=${save_every_n:-5000}
 max_duration=${max_duration:-40}
 accum_grad_batches=${accum_grad_batches:-3}
 base_lr=${base_lr:-0.045}
+exp_dir=${exp_dir:-/workspace/astra_model_a_slim}
 
 if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
       echo "Stage 1: Data Preparation for LibriTTS dataset"
@@ -41,7 +42,7 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
             --token-file data/tokens_libritts.txt \
             --dataset libritts \
             --manifest-dir data/fbank \
-            --exp-dir exp/astra_model_a_slim
+            --exp-dir ${exp_dir}
 fi
 
 if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
@@ -50,5 +51,5 @@ if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
             --iter ${num_iters} \
             --avg 10 \
             --model-name zipvoice \
-            --exp-dir exp/astra_model_a_slim
+            --exp-dir ${exp_dir}
 fi

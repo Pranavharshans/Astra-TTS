@@ -30,6 +30,17 @@ editing the scripts, for example:
 max_duration=30 accum_grad_batches=4 bash run_astra_model_a_libritts.sh
 ```
 
+Experiment outputs default to `/workspace`:
+
+- Model A: `/workspace/astra_model_a_slim`
+- Model B: `/workspace/astra_model_b_enhanced`
+
+TensorBoard logs are written under each experiment directory:
+
+```bash
+tensorboard --logdir /workspace --host 0.0.0.0 --port 6006
+```
+
 Model configs:
 
 - Model A: `ZipVoice/egs/zipvoice/conf/astra_model_a_slim.json`
