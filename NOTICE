@@ -1,0 +1,12 @@
+Astra-TTS
+
+This project vendors and modifies code from ZipVoice:
+
+  https://github.com/k2-fsa/ZipVoice
+
+ZipVoice is licensed under the Apache License, Version 2.0. The original
+license is preserved in ZipVoice/LICENSE, and the root LICENSE file contains
+the same Apache-2.0 license text for this derived repository.
+
+Original ZipVoice copyright notices and source file headers are preserved.
+
