@@ -32,3 +32,21 @@ Model configs:
 
 - Model A: `ZipVoice/egs/zipvoice/conf/astra_model_a_slim.json`
 - Model B: `ZipVoice/egs/zipvoice/conf/astra_model_b_enhanced.json`
+
+Model B optimized inference is available through `infer_zipvoice.py`:
+
+```bash
+python3 -m zipvoice.bin.infer_zipvoice \
+  --model-name zipvoice \
+  --model-dir exp/astra_model_b_enhanced \
+  --checkpoint-name iter-500000-avg-10.pt \
+  --tokenizer libritts \
+  --test-list test.tsv \
+  --res-dir results/astra_model_b_opt \
+  --num-step 4 \
+  --solver midpoint \
+  --step-schedule epss \
+  --smooth-cache True \
+  --smooth-cache-stacks 0,1 \
+  --smooth-cache-interval 2
+```

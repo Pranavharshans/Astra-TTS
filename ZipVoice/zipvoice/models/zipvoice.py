@@ -197,6 +197,7 @@ class ZipVoice(nn.Module):
         speech_condition: torch.Tensor,
         padding_mask: Optional[torch.Tensor] = None,
         guidance_scale: Optional[torch.Tensor] = None,
+        smooth_cache_state: Optional[dict] = None,
     ) -> torch.Tensor:
         """Compute velocity.
         Args:
@@ -235,10 +236,19 @@ class ZipVoice(nn.Module):
                 guidance_scale = guidance_scale.repeat(xt.shape[0])
 
             vt = self.fm_decoder(
-                x=xt, t=t, padding_mask=padding_mask, guidance_scale=guidance_scale
+                x=xt,
+                t=t,
+                padding_mask=padding_mask,
+                guidance_scale=guidance_scale,
+                smooth_cache_state=smooth_cache_state,
             )
         else:
-            vt = self.fm_decoder(x=xt, t=t, padding_mask=padding_mask)
+            vt = self.fm_decoder(
+                x=xt,
+                t=t,
+                padding_mask=padding_mask,
+                smooth_cache_state=smooth_cache_state,
+            )
         return vt
 
     def forward_text_embed(
@@ -456,6 +466,11 @@ class ZipVoice(nn.Module):
         duration: str = "predict",
         num_step: int = 5,
         guidance_scale: float = 0.5,
+        solver: str = "euler",
+        step_schedule: str = "uniform",
+        smooth_cache: bool = False,
+        smooth_cache_stacks: Optional[List[int]] = None,
+        smooth_cache_interval: int = 2,
     ) -> torch.Tensor:
         """
         Generate acoustic features, given text tokens, prompts feature
@@ -476,6 +491,8 @@ class ZipVoice(nn.Module):
         """
 
         assert duration in ["real", "predict"]
+        if smooth_cache_stacks is None:
+            smooth_cache_stacks = [0, 1]
 
         if duration == "predict":
             (
@@ -524,6 +541,11 @@ class ZipVoice(nn.Module):
             num_step=num_step,
             guidance_scale=guidance_scale,
             t_shift=t_shift,
+            solver=solver,
+            step_schedule=step_schedule,
+            smooth_cache=smooth_cache,
+            smooth_cache_stacks=smooth_cache_stacks,
+            smooth_cache_interval=smooth_cache_interval,
         )
         x1_wo_prompt_lens = (~padding_mask).sum(-1) - prompt_features_lens
         x1_prompt = torch.zeros(

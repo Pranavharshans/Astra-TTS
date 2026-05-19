@@ -244,6 +244,43 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--solver",
+        type=str,
+        default="euler",
+        choices=["euler", "midpoint"],
+        help="ODE solver used for flow-matching inference.",
+    )
+
+    parser.add_argument(
+        "--step-schedule",
+        type=str,
+        default="uniform",
+        choices=["uniform", "epss"],
+        help="Timestep schedule used by the ODE solver.",
+    )
+
+    parser.add_argument(
+        "--smooth-cache",
+        type=str2bool,
+        default=False,
+        help="Reuse selected decoder stack outputs every N model evaluations.",
+    )
+
+    parser.add_argument(
+        "--smooth-cache-stacks",
+        type=str,
+        default="0,1",
+        help="Comma-separated decoder stack indexes to cache.",
+    )
+
+    parser.add_argument(
+        "--smooth-cache-interval",
+        type=int,
+        default=2,
+        help="Compute cached stacks every N model evaluations and reuse between them.",
+    )
+
+    parser.add_argument(
         "--target-rms",
         type=float,
         default=0.1,
@@ -326,6 +363,11 @@ def generate_sentence_raw_evaluation(
     guidance_scale: float = 1.0,
     speed: float = 1.0,
     t_shift: float = 0.5,
+    solver: str = "euler",
+    step_schedule: str = "uniform",
+    smooth_cache: bool = False,
+    smooth_cache_stacks: Optional[list] = None,
+    smooth_cache_interval: int = 2,
     target_rms: float = 0.1,
     feat_scale: float = 0.1,
     sampling_rate: int = 24000,
@@ -399,6 +441,11 @@ def generate_sentence_raw_evaluation(
         duration="predict",
         num_step=num_step,
         guidance_scale=guidance_scale,
+        solver=solver,
+        step_schedule=step_schedule,
+        smooth_cache=smooth_cache,
+        smooth_cache_stacks=smooth_cache_stacks,
+        smooth_cache_interval=smooth_cache_interval,
     )
 
     # Postprocess predicted features
@@ -448,6 +495,11 @@ def generate_sentence(
     guidance_scale: float = 1.0,
     speed: float = 1.0,
     t_shift: float = 0.5,
+    solver: str = "euler",
+    step_schedule: str = "uniform",
+    smooth_cache: bool = False,
+    smooth_cache_stacks: Optional[list] = None,
+    smooth_cache_interval: int = 2,
     target_rms: float = 0.1,
     feat_scale: float = 0.1,
     sampling_rate: int = 24000,
@@ -576,6 +628,11 @@ def generate_sentence(
             duration="predict",
             num_step=num_step,
             guidance_scale=guidance_scale,
+            solver=solver,
+            step_schedule=step_schedule,
+            smooth_cache=smooth_cache,
+            smooth_cache_stacks=smooth_cache_stacks,
+            smooth_cache_interval=smooth_cache_interval,
         )
 
         # Postprocess predicted features
@@ -653,6 +710,11 @@ def generate_list(
     guidance_scale: float = 1.0,
     speed: float = 1.0,
     t_shift: float = 0.5,
+    solver: str = "euler",
+    step_schedule: str = "uniform",
+    smooth_cache: bool = False,
+    smooth_cache_stacks: Optional[list] = None,
+    smooth_cache_interval: int = 2,
     target_rms: float = 0.1,
     feat_scale: float = 0.1,
     sampling_rate: int = 24000,
@@ -686,6 +748,11 @@ def generate_list(
             "guidance_scale": guidance_scale,
             "speed": speed,
             "t_shift": t_shift,
+            "solver": solver,
+            "step_schedule": step_schedule,
+            "smooth_cache": smooth_cache,
+            "smooth_cache_stacks": smooth_cache_stacks,
+            "smooth_cache_interval": smooth_cache_interval,
             "target_rms": target_rms,
             "feat_scale": feat_scale,
             "sampling_rate": sampling_rate,
@@ -727,6 +794,9 @@ def main():
 
     params = AttributeDict()
     params.update(vars(args))
+    params.smooth_cache_stacks = [
+        int(stack) for stack in params.smooth_cache_stacks.split(",") if stack != ""
+    ]
     fix_random_seed(params.seed)
 
     model_defaults = {
@@ -857,6 +927,11 @@ def main():
             guidance_scale=params.guidance_scale,
             speed=params.speed,
             t_shift=params.t_shift,
+            solver=params.solver,
+            step_schedule=params.step_schedule,
+            smooth_cache=params.smooth_cache,
+            smooth_cache_stacks=params.smooth_cache_stacks,
+            smooth_cache_interval=params.smooth_cache_interval,
             target_rms=params.target_rms,
             feat_scale=params.feat_scale,
             sampling_rate=params.sampling_rate,
@@ -882,6 +957,11 @@ def main():
             guidance_scale=params.guidance_scale,
             speed=params.speed,
             t_shift=params.t_shift,
+            solver=params.solver,
+            step_schedule=params.step_schedule,
+            smooth_cache=params.smooth_cache,
+            smooth_cache_stacks=params.smooth_cache_stacks,
+            smooth_cache_interval=params.smooth_cache_interval,
             target_rms=params.target_rms,
             feat_scale=params.feat_scale,
             sampling_rate=params.sampling_rate,

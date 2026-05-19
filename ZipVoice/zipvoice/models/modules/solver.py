@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 import torch
 
@@ -190,6 +190,11 @@ class EulerSolver:
         t_start: float = 0.0,
         t_end: float = 1.0,
         t_shift: float = 1.0,
+        solver: str = "euler",
+        step_schedule: str = "uniform",
+        smooth_cache: bool = False,
+        smooth_cache_stacks: Sequence[int] = (0, 1),
+        smooth_cache_interval: int = 2,
         **kwargs
     ) -> torch.Tensor:
         """
@@ -218,25 +223,57 @@ class EulerSolver:
         device = x.device
         assert isinstance(t_start, float) and isinstance(t_end, float)
 
+        assert solver in ("euler", "midpoint"), solver
+        assert smooth_cache_interval > 0, smooth_cache_interval
+
         timesteps = get_time_steps(
             t_start=t_start,
             t_end=t_end,
             num_step=num_step,
             t_shift=t_shift,
+            step_schedule=step_schedule,
             device=device,
         )
 
-        for step in range(num_step):
-            v = self.model(
-                t=timesteps[step],
-                x=x,
+        cache_state = {
+            "enabled": smooth_cache,
+            "stacks": tuple(smooth_cache_stacks),
+            "values": {},
+        }
+        eval_idx = 0
+
+        def model_eval(t: torch.Tensor, cur_x: torch.Tensor) -> torch.Tensor:
+            nonlocal eval_idx
+            if smooth_cache:
+                cache_state["reuse"] = eval_idx % smooth_cache_interval != 0
+                cache_state["eval_idx"] = eval_idx
+                kwargs["smooth_cache_state"] = cache_state
+            else:
+                kwargs.pop("smooth_cache_state", None)
+            eval_idx += 1
+            return self.model(
+                t=t,
+                x=cur_x,
                 text_condition=text_condition,
                 speech_condition=speech_condition,
                 padding_mask=padding_mask,
                 guidance_scale=guidance_scale,
                 **kwargs
             )
-            x = x + v * (timesteps[step + 1] - timesteps[step])
+
+        for step in range(num_step):
+            t0 = timesteps[step]
+            t1 = timesteps[step + 1]
+            dt = t1 - t0
+            if solver == "euler":
+                v = model_eval(t0, x)
+                x = x + v * dt
+            else:
+                v0 = model_eval(t0, x)
+                t_mid = t0 + dt * 0.5
+                x_mid = x + v0 * dt * 0.5
+                v_mid = model_eval(t_mid, x_mid)
+                x = x + v_mid * dt
         return x
 
 
@@ -258,6 +295,7 @@ def get_time_steps(
     t_end: float = 1.0,
     num_step: int = 10,
     t_shift: float = 1.0,
+    step_schedule: str = "uniform",
     device: torch.device = torch.device("cpu"),
 ) -> torch.Tensor:
     """Compute the intermediate time steps for sampling.
@@ -274,7 +312,29 @@ def get_time_steps(
         The time step with the shape (num_step + 1,).
     """
 
-    timesteps = torch.linspace(t_start, t_end, num_step + 1).to(device)
+    assert step_schedule in ("uniform", "epss"), step_schedule
+
+    if step_schedule == "uniform":
+        timesteps = torch.linspace(t_start, t_end, num_step + 1).to(device)
+    else:
+        base = torch.tensor(
+            [0.0, 0.05, 0.18, 0.38, 0.62, 0.82, 0.95, 1.0], device=device
+        )
+        if num_step + 1 == base.numel():
+            timesteps = base
+        else:
+            base_x = torch.linspace(0.0, 1.0, base.numel(), device=device)
+            target_x = torch.linspace(0.0, 1.0, num_step + 1, device=device)
+            indexes = torch.searchsorted(base_x, target_x, right=True).clamp(
+                1, base.numel() - 1
+            )
+            left_x = base_x[indexes - 1]
+            right_x = base_x[indexes]
+            left_y = base[indexes - 1]
+            right_y = base[indexes]
+            weight = (target_x - left_x) / (right_x - left_x)
+            timesteps = left_y + weight * (right_y - left_y)
+        timesteps = t_start + (t_end - t_start) * timesteps
 
     timesteps = t_shift * timesteps / (1 + (t_shift - 1) * timesteps)
 

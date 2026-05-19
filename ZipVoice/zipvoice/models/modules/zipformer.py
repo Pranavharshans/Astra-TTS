@@ -440,6 +440,7 @@ class TTSZipformer(nn.Module):
         t: Optional[Tensor] = None,
         padding_mask: Optional[Tensor] = None,
         guidance_scale: Optional[Tensor] = None,
+        smooth_cache_state: Optional[dict] = None,
     ) -> Tuple[Tensor, Tensor]:
         """
         Args:
@@ -477,12 +478,28 @@ class TTSZipformer(nn.Module):
         attn_mask = None
 
         for i, module in enumerate(self.encoders):
-            x = module(
-                x,
-                time_emb=time_emb,
-                src_key_padding_mask=padding_mask,
-                attn_mask=attn_mask,
+            use_cache = (
+                smooth_cache_state is not None
+                and smooth_cache_state.get("enabled", False)
+                and i in smooth_cache_state.get("stacks", ())
             )
+            cached = None
+            if use_cache and smooth_cache_state.get("reuse", False):
+                cached = smooth_cache_state.get("values", {}).get(i)
+                if cached is not None and cached.shape != x.shape:
+                    cached = None
+
+            if cached is not None:
+                x = cached
+            else:
+                x = module(
+                    x,
+                    time_emb=time_emb,
+                    src_key_padding_mask=padding_mask,
+                    attn_mask=attn_mask,
+                )
+                if use_cache:
+                    smooth_cache_state.setdefault("values", {})[i] = x.detach()
         x = self.out_proj(x)
         x = x.permute(1, 0, 2)
         return x
