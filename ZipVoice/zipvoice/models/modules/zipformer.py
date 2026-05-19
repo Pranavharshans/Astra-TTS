@@ -69,6 +69,167 @@ def timestep_embedding(timesteps, dim, max_period=10000):
     return embedding
 
 
+def apply_rotary_position_embedding(x: Tensor, base: float = 10000.0) -> Tensor:
+    """Apply RoPE to a time-first tensor of shape (T, N, H, C)."""
+    seq_len, _, _, head_dim = x.shape
+    assert head_dim % 2 == 0, head_dim
+    positions = torch.arange(seq_len, device=x.device, dtype=torch.float32)
+    inv_freq = base ** (
+        -torch.arange(0, head_dim, 2, device=x.device, dtype=torch.float32) / head_dim
+    )
+    angles = positions[:, None] * inv_freq[None]
+    cos = angles.cos().to(dtype=x.dtype).view(seq_len, 1, 1, head_dim // 2)
+    sin = angles.sin().to(dtype=x.dtype).view(seq_len, 1, 1, head_dim // 2)
+
+    x_even = x[..., 0::2]
+    x_odd = x[..., 1::2]
+    return torch.stack(
+        (x_even * cos - x_odd * sin, x_even * sin + x_odd * cos), dim=-1
+    ).flatten(-2)
+
+
+class DilatedConvNeXtBlock(nn.Module):
+    """Lightweight local sequence block used by Astra-TTS Model B."""
+
+    def __init__(
+        self,
+        embed_dim: int,
+        intermediate_dim: int,
+        kernel_size: int = 7,
+        dilation: int = 1,
+    ) -> None:
+        super().__init__()
+        padding = dilation * (kernel_size - 1) // 2
+        self.depthwise = nn.Conv1d(
+            embed_dim,
+            embed_dim,
+            kernel_size=kernel_size,
+            padding=padding,
+            dilation=dilation,
+            groups=embed_dim,
+        )
+        self.norm = BiasNorm(embed_dim)
+        self.pointwise1 = nn.Linear(embed_dim, intermediate_dim)
+        self.activation = nn.GELU()
+        self.pointwise2 = ScaledLinear(
+            intermediate_dim,
+            embed_dim,
+            bias=True,
+            initial_scale=0.1,
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        residual = x
+        x = x.permute(1, 2, 0)
+        x = self.depthwise(x)
+        x = x.permute(2, 0, 1)
+        x = self.norm(x)
+        x = self.pointwise2(self.activation(self.pointwise1(x)))
+        return residual + x
+
+
+class ConvNeXtRefinement(nn.Module):
+    """Batch-first ConvNeXt refinement stack for text conditioning."""
+
+    def __init__(
+        self,
+        embed_dim: int,
+        intermediate_dim: int,
+        num_layers: int,
+        kernel_size: int = 7,
+        dilations: Optional[Tuple[int, ...]] = None,
+    ) -> None:
+        super().__init__()
+        if dilations is None:
+            dilations = (1, 2)
+        self.layers = nn.ModuleList(
+            [
+                DilatedConvNeXtBlock(
+                    embed_dim=embed_dim,
+                    intermediate_dim=intermediate_dim,
+                    kernel_size=kernel_size,
+                    dilation=dilations[i % len(dilations)],
+                )
+                for i in range(num_layers)
+            ]
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = x.permute(1, 0, 2)
+        for layer in self.layers:
+            x = layer(x)
+        return x.permute(1, 0, 2)
+
+
+class DepthwiseSeparableConvFeedforwardModule(nn.Module):
+    """Depthwise-separable feedforward module for Astra-TTS Model B."""
+
+    def __init__(
+        self,
+        embed_dim: int,
+        feedforward_dim: int,
+        dropout: FloatLike,
+        depthwise_kernel_size: int = 7,
+    ) -> None:
+        super().__init__()
+        padding = (depthwise_kernel_size - 1) // 2
+        self.depthwise = nn.Conv1d(
+            embed_dim,
+            embed_dim,
+            kernel_size=depthwise_kernel_size,
+            padding=padding,
+            groups=embed_dim,
+        )
+        self.hidden_balancer = Balancer(
+            feedforward_dim,
+            channel_dim=-1,
+            min_positive=0.3,
+            max_positive=1.0,
+            min_abs=0.75,
+            max_abs=5.0,
+        )
+        self.pointwise1 = nn.Linear(embed_dim, feedforward_dim)
+        self.activation = nn.GELU()
+        self.dropout = Dropout2(dropout)
+        self.pointwise2 = ScaledLinear(
+            feedforward_dim,
+            embed_dim,
+            bias=True,
+            initial_scale=0.1,
+        )
+        self.out_whiten = Whiten(
+            num_groups=1,
+            whitening_limit=_whitening_schedule(7.5),
+            prob=(0.025, 0.25),
+            grad_scale=0.01,
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = x.permute(1, 2, 0)
+        x = self.depthwise(x)
+        x = x.permute(2, 0, 1)
+        x = self.activation(x)
+        x = self.pointwise1(x)
+        x = self.hidden_balancer(x)
+        x = self.activation(x)
+        x = self.dropout(x)
+        x = self.pointwise2(x)
+        x = self.out_whiten(x)
+        return x
+
+
+class LowRankResidualAdapter(nn.Module):
+    """Small per-layer adapter used with within-stack shared base layers."""
+
+    def __init__(self, embed_dim: int, rank: int) -> None:
+        super().__init__()
+        self.down = ScaledLinear(embed_dim, rank, bias=False, initial_scale=0.05)
+        self.up = ScaledLinear(rank, embed_dim, bias=False, initial_scale=0.05)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.up(self.down(x))
+
+
 class TTSZipformer(nn.Module):
     """
     Args:
@@ -117,9 +278,14 @@ class TTSZipformer(nn.Module):
         query_head_dim: int = 24,
         pos_head_dim: int = 4,
         value_head_dim: int = 12,
+        num_kv_heads: Optional[int] = None,
         num_heads: int = 8,
         feedforward_dim: int = 1536,
+        feedforward_type: str = "standard",
+        feedforward_depthwise_kernel: int = 7,
         pos_dim: int = 192,
+        position_encoding_type: str = "relative",
+        rope_base: float = 10000.0,
         dropout: FloatLike = None,  # see code below for default
         warmup_batches: float = 4000.0,
         use_time_embed: bool = True,
@@ -127,6 +293,13 @@ class TTSZipformer(nn.Module):
         use_guidance_scale_embed: bool = False,
         guidance_scale_embed_dim: int = 192,
         use_conv: bool = True,
+        use_nonlin_attention: bool = True,
+        convnext_num_layers: Union[int, Tuple[int]] = 0,
+        convnext_intermediate_dim: Optional[int] = None,
+        convnext_kernel_size: int = 7,
+        convnext_dilation_pattern: Tuple[int, ...] = (1, 2, 4, 8),
+        parameter_sharing_mode: str = "none",
+        residual_rank: int = 32,
     ) -> None:
         super(TTSZipformer, self).__init__()
 
@@ -160,11 +333,20 @@ class TTSZipformer(nn.Module):
         self.downsampling_factor = downsampling_factor  # tuple
         num_encoder_layers = _to_tuple(num_encoder_layers)
         self.cnn_module_kernel = cnn_module_kernel = _to_tuple(cnn_module_kernel)
+        convnext_num_layers = _to_tuple(convnext_num_layers)
         self.encoder_dim = encoder_dim
         self.num_encoder_layers = num_encoder_layers
         self.query_head_dim = query_head_dim
         self.value_head_dim = value_head_dim
         self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
+        assert num_heads % self.num_kv_heads == 0, (num_heads, self.num_kv_heads)
+        assert position_encoding_type in ("relative", "rope"), position_encoding_type
+        assert feedforward_type in (
+            "standard",
+            "depthwise_separable_conv",
+        ), feedforward_type
+        assert parameter_sharing_mode in ("none", "within_stack"), parameter_sharing_mode
 
         self.use_time_embed = use_time_embed
         self.use_guidance_scale_embed = use_guidance_scale_embed
@@ -188,12 +370,22 @@ class TTSZipformer(nn.Module):
                 embed_dim=encoder_dim,
                 pos_dim=pos_dim,
                 num_heads=num_heads,
+                num_kv_heads=self.num_kv_heads,
                 query_head_dim=query_head_dim,
                 pos_head_dim=pos_head_dim,
                 value_head_dim=value_head_dim,
                 feedforward_dim=feedforward_dim,
+                feedforward_type=feedforward_type,
+                feedforward_depthwise_kernel=feedforward_depthwise_kernel,
                 use_conv=use_conv,
+                use_nonlin_attention=use_nonlin_attention,
                 cnn_module_kernel=cnn_module_kernel[i],
+                position_encoding_type=position_encoding_type,
+                rope_base=rope_base,
+                convnext_num_layers=convnext_num_layers[i],
+                convnext_intermediate_dim=convnext_intermediate_dim,
+                convnext_kernel_size=convnext_kernel_size,
+                convnext_dilation_pattern=convnext_dilation_pattern,
                 dropout=dropout,
             )
 
@@ -205,9 +397,12 @@ class TTSZipformer(nn.Module):
                 embed_dim=encoder_dim,
                 time_embed_dim=time_embed_dim,
                 pos_dim=pos_dim,
+                position_encoding_type=position_encoding_type,
                 warmup_begin=warmup_batches * (i + 1) / (num_encoders + 1),
                 warmup_end=warmup_batches * (i + 2) / (num_encoders + 1),
                 final_layerdrop_rate=0.035 * (downsampling_factor[i] ** 0.5),
+                parameter_sharing_mode=parameter_sharing_mode,
+                residual_rank=residual_rank,
             )
 
             if downsampling_factor[i] != 1:
@@ -318,13 +513,23 @@ class Zipformer2EncoderLayer(nn.Module):
         embed_dim: int,
         pos_dim: int,
         num_heads: int,
+        num_kv_heads: Optional[int],
         query_head_dim: int,
         pos_head_dim: int,
         value_head_dim: int,
         feedforward_dim: int,
+        feedforward_type: str = "standard",
+        feedforward_depthwise_kernel: int = 7,
         dropout: FloatLike = 0.1,
         cnn_module_kernel: int = 31,
         use_conv: bool = True,
+        use_nonlin_attention: bool = True,
+        position_encoding_type: str = "relative",
+        rope_base: float = 10000.0,
+        convnext_num_layers: int = 0,
+        convnext_intermediate_dim: Optional[int] = None,
+        convnext_kernel_size: int = 7,
+        convnext_dilation_pattern: Tuple[int, ...] = (1, 2, 4, 8),
         attention_skip_rate: FloatLike = ScheduledFloat(
             (0.0, 0.2), (4000.0, 0.05), (16000, 0.0), default=0
         ),
@@ -346,6 +551,8 @@ class Zipformer2EncoderLayer(nn.Module):
     ) -> None:
         super(Zipformer2EncoderLayer, self).__init__()
         self.embed_dim = embed_dim
+        self.use_nonlin_attention = use_nonlin_attention
+        self.position_encoding_type = position_encoding_type
 
         # self.bypass implements layer skipping as well as bypass.
         self.bypass = BypassModule(
@@ -371,27 +578,76 @@ class Zipformer2EncoderLayer(nn.Module):
             embed_dim,
             pos_dim=pos_dim,
             num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
             query_head_dim=query_head_dim,
             pos_head_dim=pos_head_dim,
             dropout=0.0,
+            position_encoding_type=position_encoding_type,
+            rope_base=rope_base,
         )
 
-        self.self_attn1 = SelfAttention(embed_dim, num_heads, value_head_dim)
-
-        self.self_attn2 = SelfAttention(embed_dim, num_heads, value_head_dim)
-
-        self.feed_forward1 = FeedforwardModule(
-            embed_dim, (feedforward_dim * 3) // 4, dropout
+        self.self_attn1 = SelfAttention(
+            embed_dim, num_heads, value_head_dim, num_kv_heads=num_kv_heads
         )
 
-        self.feed_forward2 = FeedforwardModule(embed_dim, feedforward_dim, dropout)
-
-        self.feed_forward3 = FeedforwardModule(
-            embed_dim, (feedforward_dim * 5) // 4, dropout
+        self.self_attn2 = SelfAttention(
+            embed_dim, num_heads, value_head_dim, num_kv_heads=num_kv_heads
         )
 
-        self.nonlin_attention = NonlinAttention(
-            embed_dim, hidden_channels=3 * embed_dim // 4
+        feedforward_class = (
+            DepthwiseSeparableConvFeedforwardModule
+            if feedforward_type == "depthwise_separable_conv"
+            else FeedforwardModule
+        )
+
+        if feedforward_class is DepthwiseSeparableConvFeedforwardModule:
+            self.feed_forward1 = feedforward_class(
+                embed_dim,
+                (feedforward_dim * 3) // 4,
+                dropout,
+                depthwise_kernel_size=feedforward_depthwise_kernel,
+            )
+            self.feed_forward2 = feedforward_class(
+                embed_dim,
+                feedforward_dim,
+                dropout,
+                depthwise_kernel_size=feedforward_depthwise_kernel,
+            )
+            self.feed_forward3 = feedforward_class(
+                embed_dim,
+                (feedforward_dim * 5) // 4,
+                dropout,
+                depthwise_kernel_size=feedforward_depthwise_kernel,
+            )
+        else:
+            self.feed_forward1 = feedforward_class(
+                embed_dim, (feedforward_dim * 3) // 4, dropout
+            )
+            self.feed_forward2 = feedforward_class(embed_dim, feedforward_dim, dropout)
+            self.feed_forward3 = feedforward_class(
+                embed_dim, (feedforward_dim * 5) // 4, dropout
+            )
+
+        if self.use_nonlin_attention:
+            self.nonlin_attention = NonlinAttention(
+                embed_dim, hidden_channels=3 * embed_dim // 4
+            )
+        else:
+            self.nonlin_attention = None
+
+        convnext_intermediate_dim = convnext_intermediate_dim or embed_dim * 2
+        self.convnext_blocks = nn.ModuleList(
+            [
+                DilatedConvNeXtBlock(
+                    embed_dim=embed_dim,
+                    intermediate_dim=convnext_intermediate_dim,
+                    kernel_size=convnext_kernel_size,
+                    dilation=convnext_dilation_pattern[
+                        i % len(convnext_dilation_pattern)
+                    ],
+                )
+                for i in range(convnext_num_layers)
+            ]
         )
 
         self.use_conv = use_conv
@@ -412,15 +668,18 @@ class Zipformer2EncoderLayer(nn.Module):
             max_abs=4.0,
         )
 
-        # balancer for output of NonlinAttentionModule
-        self.balancer_na = Balancer(
-            embed_dim,
-            channel_dim=-1,
-            min_positive=0.3,
-            max_positive=0.7,
-            min_abs=ScheduledFloat((0.0, 0.004), (4000.0, 0.02)),
-            prob=0.05,  # out of concern for memory usage
-        )
+        if self.use_nonlin_attention:
+            # balancer for output of NonlinAttentionModule
+            self.balancer_na = Balancer(
+                embed_dim,
+                channel_dim=-1,
+                min_positive=0.3,
+                max_positive=0.7,
+                min_abs=ScheduledFloat((0.0, 0.004), (4000.0, 0.02)),
+                prob=0.05,  # out of concern for memory usage
+            )
+        else:
+            self.balancer_na = None
 
         # balancer for output of feedforward2, prevent it from staying too
         # small.  give this a very small probability, even at the start of
@@ -514,6 +773,9 @@ class Zipformer2EncoderLayer(nn.Module):
         """
         src_orig = src
 
+        for convnext_block in self.convnext_blocks:
+            src = convnext_block(src)
+
         # dropout rate for non-feedforward submodules
         if torch.jit.is_scripting() or torch.jit.is_tracing():
             attention_skip_rate = 0.0
@@ -555,11 +817,12 @@ class Zipformer2EncoderLayer(nn.Module):
                 1.0 / selected_attn_weights.sum(dim=-1, keepdim=True)
             )
 
-        na = self.balancer_na(self.nonlin_attention(src, selected_attn_weights))
+        if self.use_nonlin_attention:
+            na = self.balancer_na(self.nonlin_attention(src, selected_attn_weights))
 
-        src = src + (
-            na if self_attn_dropout_mask is None else na * self_attn_dropout_mask
-        )
+            src = src + (
+                na if self_attn_dropout_mask is None else na * self_attn_dropout_mask
+            )
 
         self_attn = self.self_attn1(src, attn_weights)
 
@@ -664,15 +927,22 @@ class Zipformer2Encoder(nn.Module):
         embed_dim: int,
         time_embed_dim: int,
         pos_dim: int,
+        position_encoding_type: str,
         warmup_begin: float,
         warmup_end: float,
         initial_layerdrop_rate: float = 0.5,
         final_layerdrop_rate: float = 0.05,
+        parameter_sharing_mode: str = "none",
+        residual_rank: int = 32,
     ) -> None:
         super().__init__()
-        self.encoder_pos = CompactRelPositionalEncoding(
-            pos_dim, dropout_rate=0.15, length_factor=1.0
-        )
+        self.position_encoding_type = position_encoding_type
+        if position_encoding_type == "relative":
+            self.encoder_pos = CompactRelPositionalEncoding(
+                pos_dim, dropout_rate=0.15, length_factor=1.0
+            )
+        else:
+            self.encoder_pos = None
         if time_embed_dim != -1:
             self.time_emb = nn.Sequential(
                 SwooshR(),
@@ -681,9 +951,19 @@ class Zipformer2Encoder(nn.Module):
         else:
             self.time_emb = None
 
-        self.layers = nn.ModuleList(
-            [copy.deepcopy(encoder_layer) for i in range(num_layers)]
-        )
+        self.parameter_sharing_mode = parameter_sharing_mode
+        if parameter_sharing_mode == "within_stack" and num_layers > 1:
+            self.layers = nn.ModuleList([copy.deepcopy(encoder_layer)])
+            self.layer_indexes = [0] * num_layers
+            self.residual_adapters = nn.ModuleList(
+                [LowRankResidualAdapter(embed_dim, residual_rank) for _ in range(num_layers)]
+            )
+        else:
+            self.layers = nn.ModuleList(
+                [copy.deepcopy(encoder_layer) for i in range(num_layers)]
+            )
+            self.layer_indexes = list(range(num_layers))
+            self.residual_adapters = None
         self.num_layers = num_layers
 
         assert 0 <= warmup_begin <= warmup_end
@@ -692,7 +972,8 @@ class Zipformer2Encoder(nn.Module):
         cur_begin = warmup_begin  # interpreted as a training batch index
         for i in range(num_layers):
             cur_end = cur_begin + delta
-            self.layers[i].bypass.skip_rate = ScheduledFloat(
+            layer = self.layers[self.layer_indexes[i]]
+            layer.bypass.skip_rate = ScheduledFloat(
                 (cur_begin, initial_layerdrop_rate),
                 (cur_end, final_layerdrop_rate),
                 default=0.0,
@@ -723,7 +1004,7 @@ class Zipformer2Encoder(nn.Module):
 
         Returns: a Tensor with the same shape as src.
         """
-        pos_emb = self.encoder_pos(src)
+        pos_emb = self.encoder_pos(src) if self.encoder_pos is not None else None
         if self.time_emb is not None:
             assert time_emb is not None
             time_emb = self.time_emb(time_emb)
@@ -732,7 +1013,8 @@ class Zipformer2Encoder(nn.Module):
 
         output = src
 
-        for i, mod in enumerate(self.layers):
+        for i, layer_index in enumerate(self.layer_indexes):
+            mod = self.layers[layer_index]
             output = mod(
                 output,
                 pos_emb,
@@ -740,6 +1022,8 @@ class Zipformer2Encoder(nn.Module):
                 attn_mask=attn_mask,
                 src_key_padding_mask=src_key_padding_mask,
             )
+            if self.residual_adapters is not None:
+                output = output + self.residual_adapters[i](output)
 
         return output
 
@@ -1083,22 +1367,34 @@ class RelPositionMultiheadAttentionWeights(nn.Module):
         embed_dim: int,
         pos_dim: int,
         num_heads: int,
+        num_kv_heads: Optional[int],
         query_head_dim: int,
         pos_head_dim: int,
         dropout: float = 0.0,
+        position_encoding_type: str = "relative",
+        rope_base: float = 10000.0,
         pos_emb_skip_rate: FloatLike = ScheduledFloat((0.0, 0.5), (4000.0, 0.0)),
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
+        assert num_heads % self.num_kv_heads == 0, (num_heads, self.num_kv_heads)
         self.query_head_dim = query_head_dim
         self.pos_head_dim = pos_head_dim
         self.dropout = dropout
+        self.position_encoding_type = position_encoding_type
+        self.rope_base = rope_base
         self.pos_emb_skip_rate = copy.deepcopy(pos_emb_skip_rate)
         self.name = None  # will be overwritten in training code; for diagnostics.
 
         key_head_dim = query_head_dim
-        in_proj_dim = (query_head_dim + key_head_dim + pos_head_dim) * num_heads
+        query_dim = query_head_dim * num_heads
+        key_dim = key_head_dim * self.num_kv_heads
+        pos_proj_dim = 0
+        if position_encoding_type == "relative":
+            pos_proj_dim = pos_head_dim * num_heads
+        in_proj_dim = query_dim + key_dim + pos_proj_dim
 
         # the initial_scale is supposed to take over the "scaling" factor of
         # head_dim ** -0.5 that has been used in previous forms of attention,
@@ -1113,7 +1409,7 @@ class RelPositionMultiheadAttentionWeights(nn.Module):
         )
 
         self.whiten_keys = Whiten(
-            num_groups=num_heads,
+            num_groups=self.num_kv_heads,
             whitening_limit=_whitening_schedule(3.0),
             prob=(0.025, 0.25),
             grad_scale=0.025,
@@ -1128,7 +1424,7 @@ class RelPositionMultiheadAttentionWeights(nn.Module):
         # sign.  This module is intended to prevent that.  Use a very small
         # probability; that should be sufficient to fix the problem.
         self.balance_keys = Balancer(
-            key_head_dim * num_heads,
+            key_head_dim * self.num_kv_heads,
             channel_dim=-1,
             min_positive=0.4,
             max_positive=0.6,
@@ -1138,9 +1434,12 @@ class RelPositionMultiheadAttentionWeights(nn.Module):
         )
 
         # linear transformation for positional encoding.
-        self.linear_pos = ScaledLinear(
-            pos_dim, num_heads * pos_head_dim, bias=False, initial_scale=0.05
-        )
+        if position_encoding_type == "relative":
+            self.linear_pos = ScaledLinear(
+                pos_dim, num_heads * pos_head_dim, bias=False, initial_scale=0.05
+            )
+        else:
+            self.linear_pos = None
 
         # the following are for diagnostics only, see --print-diagnostics option
         self.copy_pos_query = Identity()
@@ -1149,7 +1448,7 @@ class RelPositionMultiheadAttentionWeights(nn.Module):
     def forward(
         self,
         x: Tensor,
-        pos_emb: Tensor,
+        pos_emb: Optional[Tensor],
         key_padding_mask: Optional[Tensor] = None,
         attn_mask: Optional[Tensor] = None,
     ) -> Tensor:
@@ -1173,33 +1472,44 @@ class RelPositionMultiheadAttentionWeights(nn.Module):
         query_head_dim = self.query_head_dim
         pos_head_dim = self.pos_head_dim
         num_heads = self.num_heads
+        num_kv_heads = self.num_kv_heads
 
         seq_len, batch_size, _ = x.shape
 
         query_dim = query_head_dim * num_heads
+        key_dim = query_head_dim * num_kv_heads
 
         # self-attention
         q = x[..., 0:query_dim]
-        k = x[..., query_dim : 2 * query_dim]
+        k = x[..., query_dim : query_dim + key_dim]
         # p is the position-encoding query
-        p = x[..., 2 * query_dim :]
-        assert p.shape[-1] == num_heads * pos_head_dim, (
-            p.shape[-1],
-            num_heads,
-            pos_head_dim,
-        )
+        p = x[..., query_dim + key_dim :]
+        if self.position_encoding_type == "relative":
+            assert p.shape[-1] == num_heads * pos_head_dim, (
+                p.shape[-1],
+                num_heads,
+                pos_head_dim,
+            )
 
         q = self.copy_query(q)  # for diagnostics only, does nothing.
         k = self.whiten_keys(self.balance_keys(k))  # does nothing in the forward pass.
-        p = self.copy_pos_query(p)  # for diagnostics only, does nothing.
+        if self.position_encoding_type == "relative":
+            p = self.copy_pos_query(p)  # for diagnostics only, does nothing.
 
         q = q.reshape(seq_len, batch_size, num_heads, query_head_dim)
-        p = p.reshape(seq_len, batch_size, num_heads, pos_head_dim)
-        k = k.reshape(seq_len, batch_size, num_heads, query_head_dim)
+        k = k.reshape(seq_len, batch_size, num_kv_heads, query_head_dim)
+        if self.position_encoding_type == "rope":
+            q = apply_rotary_position_embedding(q, base=self.rope_base)
+            k = apply_rotary_position_embedding(k, base=self.rope_base)
+        if self.position_encoding_type == "relative":
+            p = p.reshape(seq_len, batch_size, num_heads, pos_head_dim)
+        if num_kv_heads != num_heads:
+            k = k.repeat_interleave(num_heads // num_kv_heads, dim=2)
 
         # time1 refers to target, time2 refers to source.
         q = q.permute(2, 1, 0, 3)  # (head, batch, time1, query_head_dim)
-        p = p.permute(2, 1, 0, 3)  # (head, batch, time1, pos_head_dim)
+        if self.position_encoding_type == "relative":
+            p = p.permute(2, 1, 0, 3)  # (head, batch, time1, pos_head_dim)
         k = k.permute(2, 1, 3, 0)  # (head, batch, d_k, time2)
 
         attn_scores = torch.matmul(q, k)
@@ -1211,7 +1521,12 @@ class RelPositionMultiheadAttentionWeights(nn.Module):
         elif not self.training or random.random() >= float(self.pos_emb_skip_rate):
             use_pos_scores = True
 
+        if self.position_encoding_type == "rope":
+            use_pos_scores = False
+
         if use_pos_scores:
+            assert pos_emb is not None
+            assert self.linear_pos is not None
             pos_emb = self.linear_pos(pos_emb)
             seq_len2 = 2 * seq_len - 1
             pos_emb = pos_emb.reshape(-1, seq_len2, num_heads, pos_head_dim).permute(
@@ -1338,9 +1653,15 @@ class SelfAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         value_head_dim: int,
+        num_kv_heads: Optional[int] = None,
     ) -> None:
         super().__init__()
-        self.in_proj = nn.Linear(embed_dim, num_heads * value_head_dim, bias=True)
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
+        assert num_heads % self.num_kv_heads == 0, (num_heads, self.num_kv_heads)
+        self.in_proj = nn.Linear(
+            embed_dim, self.num_kv_heads * value_head_dim, bias=True
+        )
 
         self.out_proj = ScaledLinear(
             num_heads * value_head_dim,
@@ -1374,8 +1695,11 @@ class SelfAttention(nn.Module):
         num_heads = attn_weights.shape[0]
         assert attn_weights.shape == (num_heads, batch_size, seq_len, seq_len)
 
-        x = self.in_proj(x)  # (seq_len, batch_size, num_heads * value_head_dim)
-        x = x.reshape(seq_len, batch_size, num_heads, -1).permute(2, 1, 0, 3)
+        x = self.in_proj(x)  # (seq_len, batch_size, num_kv_heads * value_head_dim)
+        x = x.reshape(seq_len, batch_size, self.num_kv_heads, -1)
+        if self.num_kv_heads != num_heads:
+            x = x.repeat_interleave(num_heads // self.num_kv_heads, dim=2)
+        x = x.permute(2, 1, 0, 3)
         # now x: (num_heads, batch_size, seq_len, value_head_dim)
         value_head_dim = x.shape[-1]
 

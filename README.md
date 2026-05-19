@@ -14,3 +14,13 @@ The model specifications live in:
 
 - `Arch+prd/model_a_slim.md`
 - `Arch+prd/model_b_enhanced.md`
+
+Training entry points:
+
+- Model A: `ZipVoice/egs/zipvoice/run_astra_model_a_libritts.sh`
+- Model B: `ZipVoice/egs/zipvoice/run_astra_model_b_libritts.sh`
+
+Model configs:
+
+- Model A: `ZipVoice/egs/zipvoice/conf/astra_model_a_slim.json`
+- Model B: `ZipVoice/egs/zipvoice/conf/astra_model_b_enhanced.json`

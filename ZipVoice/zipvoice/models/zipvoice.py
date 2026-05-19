@@ -22,7 +22,7 @@ import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from zipvoice.models.modules.solver import EulerSolver
-from zipvoice.models.modules.zipformer import TTSZipformer
+from zipvoice.models.modules.zipformer import ConvNeXtRefinement, TTSZipformer
 from zipvoice.utils.common import (
     condition_time_mask,
     get_tokens_index,
@@ -41,13 +41,35 @@ class ZipVoice(nn.Module):
         fm_decoder_num_layers: List[int] = [2, 2, 4, 4, 4],
         fm_decoder_cnn_module_kernel: List[int] = [31, 15, 7, 15, 31],
         fm_decoder_feedforward_dim: int = 1536,
+        fm_decoder_feedforward_type: str = "standard",
+        fm_decoder_feedforward_depthwise_kernel: int = 7,
         fm_decoder_num_heads: int = 4,
+        fm_decoder_num_kv_heads: Optional[int] = None,
         fm_decoder_dim: int = 512,
+        fm_decoder_use_nonlin_attention: bool = True,
+        fm_decoder_position_encoding_type: str = "relative",
+        fm_decoder_rope_base: float = 10000.0,
+        fm_decoder_convnext_num_layers: Optional[List[int]] = None,
+        fm_decoder_convnext_intermediate_dim: Optional[int] = None,
+        fm_decoder_convnext_kernel_size: int = 7,
+        fm_decoder_convnext_dilation_pattern: Optional[List[int]] = None,
+        fm_decoder_parameter_sharing_mode: str = "none",
+        fm_decoder_residual_rank: int = 32,
         text_encoder_num_layers: int = 4,
         text_encoder_feedforward_dim: int = 512,
+        text_encoder_feedforward_type: str = "standard",
+        text_encoder_feedforward_depthwise_kernel: int = 7,
         text_encoder_cnn_module_kernel: int = 9,
         text_encoder_num_heads: int = 4,
+        text_encoder_num_kv_heads: Optional[int] = None,
         text_encoder_dim: int = 192,
+        text_encoder_use_nonlin_attention: bool = True,
+        text_encoder_position_encoding_type: str = "relative",
+        text_encoder_rope_base: float = 10000.0,
+        text_refinement_num_layers: int = 0,
+        text_refinement_intermediate_dim: int = 512,
+        text_refinement_kernel_size: int = 7,
+        text_refinement_dilation_pattern: Optional[List[int]] = None,
         time_embed_dim: int = 192,
         text_embed_dim: int = 192,
         query_head_dim: int = 32,
@@ -91,6 +113,12 @@ class ZipVoice(nn.Module):
             pad_id: ID used for padding tokens.
         """
         super().__init__()
+        if fm_decoder_convnext_num_layers is None:
+            fm_decoder_convnext_num_layers = [0] * len(fm_decoder_num_layers)
+        if fm_decoder_convnext_dilation_pattern is None:
+            fm_decoder_convnext_dilation_pattern = [1, 2, 4, 8]
+        if text_refinement_dilation_pattern is None:
+            text_refinement_dilation_pattern = [1, 2]
 
         self.fm_decoder = TTSZipformer(
             in_dim=feat_dim * 3,
@@ -100,13 +128,25 @@ class ZipVoice(nn.Module):
             cnn_module_kernel=fm_decoder_cnn_module_kernel,
             encoder_dim=fm_decoder_dim,
             feedforward_dim=fm_decoder_feedforward_dim,
+            feedforward_type=fm_decoder_feedforward_type,
+            feedforward_depthwise_kernel=fm_decoder_feedforward_depthwise_kernel,
             num_heads=fm_decoder_num_heads,
+            num_kv_heads=fm_decoder_num_kv_heads,
             query_head_dim=query_head_dim,
             pos_head_dim=pos_head_dim,
             value_head_dim=value_head_dim,
             pos_dim=pos_dim,
+            position_encoding_type=fm_decoder_position_encoding_type,
+            rope_base=fm_decoder_rope_base,
             use_time_embed=True,
             time_embed_dim=time_embed_dim,
+            use_nonlin_attention=fm_decoder_use_nonlin_attention,
+            convnext_num_layers=fm_decoder_convnext_num_layers,
+            convnext_intermediate_dim=fm_decoder_convnext_intermediate_dim,
+            convnext_kernel_size=fm_decoder_convnext_kernel_size,
+            convnext_dilation_pattern=tuple(fm_decoder_convnext_dilation_pattern),
+            parameter_sharing_mode=fm_decoder_parameter_sharing_mode,
+            residual_rank=fm_decoder_residual_rank,
         )
 
         self.text_encoder = TTSZipformer(
@@ -117,13 +157,30 @@ class ZipVoice(nn.Module):
             cnn_module_kernel=text_encoder_cnn_module_kernel,
             encoder_dim=text_encoder_dim,
             feedforward_dim=text_encoder_feedforward_dim,
+            feedforward_type=text_encoder_feedforward_type,
+            feedforward_depthwise_kernel=text_encoder_feedforward_depthwise_kernel,
             num_heads=text_encoder_num_heads,
+            num_kv_heads=text_encoder_num_kv_heads,
             query_head_dim=query_head_dim,
             pos_head_dim=pos_head_dim,
             value_head_dim=value_head_dim,
             pos_dim=pos_dim,
+            position_encoding_type=text_encoder_position_encoding_type,
+            rope_base=text_encoder_rope_base,
             use_time_embed=False,
+            use_nonlin_attention=text_encoder_use_nonlin_attention,
         )
+
+        if text_refinement_num_layers > 0:
+            self.text_refinement = ConvNeXtRefinement(
+                embed_dim=feat_dim,
+                intermediate_dim=text_refinement_intermediate_dim,
+                num_layers=text_refinement_num_layers,
+                kernel_size=text_refinement_kernel_size,
+                dilations=tuple(text_refinement_dilation_pattern),
+            )
+        else:
+            self.text_refinement = None
 
         self.feat_dim = feat_dim
         self.text_embed_dim = text_embed_dim
@@ -209,6 +266,8 @@ class ZipVoice(nn.Module):
         embed = self.text_encoder(
             x=embed, t=None, padding_mask=tokens_padding_mask
         )  # (B, S, C)
+        if self.text_refinement is not None:
+            embed = self.text_refinement(embed)
         return embed, tokens_lens
 
     def forward_text_condition(
