@@ -10,6 +10,12 @@ set -o pipefail
 
 stage=1
 stop_stage=3
+world_size=${world_size:-1}
+use_fp16=${use_fp16:-1}
+num_iters=${num_iters:-500000}
+save_every_n=${save_every_n:-5000}
+max_duration=${max_duration:-100}
+base_lr=${base_lr:-0.045}
 
 if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
       echo "Stage 1: Data Preparation for LibriTTS dataset"
@@ -19,13 +25,13 @@ fi
 if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
       echo "Stage 2: Train Astra-TTS Model B (ZipVoice-Enhanced)"
       python3 -m zipvoice.bin.train_zipvoice \
-            --world-size 8 \
-            --use-fp16 0 \
-            --num-iters 500000 \
-            --save-every-n 5000 \
-            --max-duration 250 \
+            --world-size ${world_size} \
+            --use-fp16 ${use_fp16} \
+            --num-iters ${num_iters} \
+            --save-every-n ${save_every_n} \
+            --max-duration ${max_duration} \
             --lr-epochs 10 \
-            --base-lr 0.045 \
+            --base-lr ${base_lr} \
             --max-len 20 \
             --valid-by-epoch 0 \
             --model-config conf/astra_model_b_enhanced.json \
@@ -39,7 +45,7 @@ fi
 if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
       echo "Stage 3: Average checkpoints for Astra-TTS Model B"
       python3 -m zipvoice.bin.generate_averaged_model \
-            --iter 500000 \
+            --iter ${num_iters} \
             --avg 10 \
             --model-name zipvoice \
             --exp-dir exp/astra_model_b_enhanced

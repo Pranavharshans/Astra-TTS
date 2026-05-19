@@ -20,6 +20,14 @@ Training entry points:
 - Model A: `ZipVoice/egs/zipvoice/run_astra_model_a_libritts.sh`
 - Model B: `ZipVoice/egs/zipvoice/run_astra_model_b_libritts.sh`
 
+The Astra training wrappers default to a single 40GB GPU profile:
+`world_size=1`, `use_fp16=1`, and `max_duration=100`. You can override these
+without editing the scripts, for example:
+
+```bash
+max_duration=80 bash run_astra_model_a_libritts.sh
+```
+
 Model configs:
 
 - Model A: `ZipVoice/egs/zipvoice/conf/astra_model_a_slim.json`
