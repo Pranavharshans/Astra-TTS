@@ -625,8 +625,7 @@ def train_one_epoch(
             scaler.scale(loss / params.accum_grad_batches).backward()
 
             is_accum_step = (batch_idx + 1) % params.accum_grad_batches == 0
-            is_last_batch = batch_idx + 1 == len(train_dl)
-            if not is_accum_step and not is_last_batch:
+            if not is_accum_step:
                 continue
 
             params.batch_idx_train += 1
