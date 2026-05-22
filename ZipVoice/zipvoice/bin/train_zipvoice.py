@@ -532,22 +532,28 @@ def disable_aux_grad_penalties(model: Union[nn.Module, DDP]) -> None:
     if isinstance(model, DDP):
         model = model.module
 
+    def zero_floatlike_attr(module: nn.Module, attr: str) -> None:
+        value = getattr(module, attr, None)
+        if isinstance(value, nn.Module):
+            if hasattr(value, "default"):
+                value.default = 0.0
+            if hasattr(value, "schedule"):
+                value.schedule = value.schedule * 0.0
+        elif value is not None:
+            setattr(module, attr, 0.0)
+
     num_balancers = 0
     num_whitens = 0
     for module in model.modules():
         class_name = module.__class__.__name__
         if class_name == "Balancer" and hasattr(module, "prob"):
-            module.prob = 0.0
+            zero_floatlike_attr(module, "prob")
             num_balancers += 1
         elif class_name == "Whiten":
-            if hasattr(module, "prob"):
-                module.prob = 0.0
-            if hasattr(module, "min_prob"):
-                module.min_prob = 0.0
-            if hasattr(module, "max_prob"):
-                module.max_prob = 0.0
-            if hasattr(module, "grad_scale"):
-                module.grad_scale = 0.0
+            zero_floatlike_attr(module, "prob")
+            zero_floatlike_attr(module, "min_prob")
+            zero_floatlike_attr(module, "max_prob")
+            zero_floatlike_attr(module, "grad_scale")
             num_whitens += 1
 
     logging.info(
