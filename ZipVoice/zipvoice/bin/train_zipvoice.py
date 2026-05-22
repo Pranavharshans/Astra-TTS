@@ -168,6 +168,30 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--optimizer",
+        type=str,
+        default="scaledadam",
+        choices=["scaledadam", "adamw"],
+        help="Optimizer to use. ScaledAdam is the default recipe optimizer; AdamW is "
+        "useful for conservative fine-tuning from numerically fragile checkpoints.",
+    )
+
+    parser.add_argument(
+        "--adamw-weight-decay",
+        type=float,
+        default=0.01,
+        help="Weight decay used when --optimizer=adamw.",
+    )
+
+    parser.add_argument(
+        "--grad-clip",
+        type=float,
+        default=1.0,
+        help="Gradient norm clipping threshold used when --optimizer=adamw. "
+        "Set <= 0 to disable clipping.",
+    )
+
+    parser.add_argument(
         "--lr-batches",
         type=float,
         default=7500,
@@ -628,6 +652,24 @@ def train_one_epoch(
             if not is_accum_step:
                 continue
 
+            if params.optimizer == "adamw":
+                if params.use_fp16:
+                    scaler.unscale_(optimizer)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    max_norm=params.grad_clip if params.grad_clip > 0 else float("inf"),
+                    error_if_nonfinite=False,
+                )
+                if not torch.isfinite(grad_norm):
+                    logging.warning(
+                        f"Skipping optimizer step due to non-finite grad norm: "
+                        f"{grad_norm}"
+                    )
+                    optimizer.zero_grad()
+                    if params.use_fp16:
+                        scaler.update()
+                    continue
+
             params.batch_idx_train += 1
 
             scheduler.step_batch(params.batch_idx_train)
@@ -963,15 +1005,27 @@ def run(rank, world_size, args):
         logging.info("Using DDP")
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-    optimizer = ScaledAdam(
-        get_parameter_groups_with_lrs(
-            model,
+    if params.optimizer == "scaledadam":
+        optimizer = ScaledAdam(
+            get_parameter_groups_with_lrs(
+                model,
+                lr=params.base_lr,
+                include_names=True,
+            ),
+            lr=params.base_lr,  # should have no effect
+            clipping_scale=2.0,
+        )
+    else:
+        assert params.optimizer == "adamw", params.optimizer
+        optimizer = torch.optim.AdamW(
+            get_parameter_groups_with_lrs(
+                model,
+                lr=params.base_lr,
+                include_names=False,
+            ),
             lr=params.base_lr,
-            include_names=True,
-        ),
-        lr=params.base_lr,  # should have no effect
-        clipping_scale=2.0,
-    )
+            weight_decay=params.adamw_weight_decay,
+        )
 
     assert params.lr_hours >= 0
 

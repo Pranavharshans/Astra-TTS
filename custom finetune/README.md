@@ -8,8 +8,13 @@ Default experiment:
 - Checkpoint: `checkpoint-200000.pt`
 - Dataset: LJSpeech 1.1
 - Fine-tune length: 30,000 steps
-- Output directory: `/workspace/astra_model_b_enhanced_ljspeech_ft_30k`
-- Safer defaults: `base_lr=0.0001`, `use_fp16=0`
+- Output directory: `/workspace/astra_model_b_enhanced_ljspeech_ft_adamw_30k`
+- Safer defaults: `optimizer=adamw`, `base_lr=1e-5`, `max_duration=40`, `use_fp16=0`
+
+The base HF artifact is a training checkpoint. The script exports a weights-only
+checkpoint first, preferring `model_avg` when present, and fine-tunes from that file.
+This avoids starting the fine-tune from a raw instantaneous training state and avoids
+loading optimizer/scheduler/scaler state.
 
 Run from the repo root on a GPU VM:
 
@@ -23,7 +28,9 @@ Useful overrides:
 ```bash
 num_iters=10000 bash "custom finetune/run_ljspeech_finetune_model_b_200k.sh"
 
-base_lr=0.0002 max_duration=100 use_fp16=0 bash "custom finetune/run_ljspeech_finetune_model_b_200k.sh"
+base_lr=5e-6 max_duration=30 use_fp16=0 bash "custom finetune/run_ljspeech_finetune_model_b_200k.sh"
+
+optimizer=scaledadam base_lr=1e-5 max_duration=30 use_fp16=0 bash "custom finetune/run_ljspeech_finetune_model_b_200k.sh"
 
 hf_repo=Praha-Labs/astra-tts-model-b-enhanced-250k \
 checkpoint_name=checkpoint-250000.pt \

@@ -25,17 +25,21 @@ raw_dir="${raw_dir:-${data_dir}/raw}"
 manifest_dir="${manifest_dir:-${data_dir}/manifests}"
 fbank_dir="${fbank_dir:-${data_dir}/fbank}"
 model_dir="${model_dir:-${work_dir}/base_model}"
-exp_dir="${exp_dir:-/workspace/astra_model_b_enhanced_ljspeech_ft_30k}"
+exp_dir="${exp_dir:-/workspace/astra_model_b_enhanced_ljspeech_ft_adamw_30k}"
 
 nj="${nj:-8}"
 num_iters="${num_iters:-30000}"
 save_every_n="${save_every_n:-1000}"
-max_duration="${max_duration:-120}"
+max_duration="${max_duration:-40}"
 max_len="${max_len:-12}"
-base_lr="${base_lr:-0.0001}"
+base_lr="${base_lr:-1e-5}"
 use_fp16="${use_fp16:-0}"
 accum_grad_batches="${accum_grad_batches:-1}"
 dev_size="${dev_size:-500}"
+optimizer="${optimizer:-adamw}"
+adamw_weight_decay="${adamw_weight_decay:-0.01}"
+grad_clip="${grad_clip:-1.0}"
+finetune_checkpoint="${finetune_checkpoint:-${model_dir}/model-avg-${checkpoint_name}}"
 
 ljspeech_url="${ljspeech_url:-https://data.keithito.com/data/speech/LJSpeech-1.1.tar.bz2}"
 ljspeech_archive="${raw_dir}/LJSpeech-1.1.tar.bz2"
@@ -140,6 +144,25 @@ if [ "${stage}" -le 5 ] && [ "${stop_stage}" -ge 5 ]; then
       exit 1
     }
   done
+
+  echo "Stage 5b: Export weights-only checkpoint for fine-tuning"
+  python3 - <<PY
+import torch
+
+src = "${model_dir}/${checkpoint_name}"
+dst = "${finetune_checkpoint}"
+
+ckpt = torch.load(src, map_location="cpu", weights_only=False)
+if "model_avg" in ckpt and ckpt["model_avg"] is not None:
+    state = ckpt["model_avg"]
+    source = "model_avg"
+else:
+    state = ckpt["model"]
+    source = "model"
+
+torch.save({"model": state}, dst)
+print(f"Saved {dst} from {source}")
+PY
 fi
 
 if [ "${stage}" -le 6 ] && [ "${stop_stage}" -ge 6 ]; then
@@ -148,6 +171,9 @@ if [ "${stage}" -le 6 ] && [ "${stop_stage}" -ge 6 ]; then
     --world-size 1 \
     --use-fp16 "${use_fp16}" \
     --finetune 1 \
+    --optimizer "${optimizer}" \
+    --adamw-weight-decay "${adamw_weight_decay}" \
+    --grad-clip "${grad_clip}" \
     --num-iters "${num_iters}" \
     --save-every-n "${save_every_n}" \
     --max-duration "${max_duration}" \
@@ -156,7 +182,7 @@ if [ "${stage}" -le 6 ] && [ "${stop_stage}" -ge 6 ]; then
     --max-len "${max_len}" \
     --valid-by-epoch 0 \
     --model-config "${model_dir}/model.json" \
-    --checkpoint "${model_dir}/${checkpoint_name}" \
+    --checkpoint "${finetune_checkpoint}" \
     --tokenizer libritts \
     --token-file "${model_dir}/tokens.txt" \
     --dataset custom \
