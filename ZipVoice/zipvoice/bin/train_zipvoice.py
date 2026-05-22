@@ -262,6 +262,15 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--disable-aux-grad-penalties",
+        type=str2bool,
+        default=False,
+        help="Disable Balancer/Whiten auxiliary gradient modification modules. "
+        "This is useful for conservative fine-tuning when a checkpoint has finite "
+        "forward loss but non-finite gradients.",
+    )
+
+    parser.add_argument(
         "--save-every-n",
         type=int,
         default=5000,
@@ -516,6 +525,35 @@ def compute_fbank_loss(
     info["loss"] = loss.detach().cpu().item() * num_frames
 
     return loss, info
+
+
+def disable_aux_grad_penalties(model: Union[nn.Module, DDP]) -> None:
+    """Disable stochastic gradient-shaping modules without changing the forward pass."""
+    if isinstance(model, DDP):
+        model = model.module
+
+    num_balancers = 0
+    num_whitens = 0
+    for module in model.modules():
+        class_name = module.__class__.__name__
+        if class_name == "Balancer" and hasattr(module, "prob"):
+            module.prob = 0.0
+            num_balancers += 1
+        elif class_name == "Whiten":
+            if hasattr(module, "prob"):
+                module.prob = 0.0
+            if hasattr(module, "min_prob"):
+                module.min_prob = 0.0
+            if hasattr(module, "max_prob"):
+                module.max_prob = 0.0
+            if hasattr(module, "grad_scale"):
+                module.grad_scale = 0.0
+            num_whitens += 1
+
+    logging.info(
+        f"Disabled auxiliary gradient penalties: "
+        f"{num_balancers} Balancer modules, {num_whitens} Whiten modules"
+    )
 
 
 def train_one_epoch(
@@ -990,6 +1028,9 @@ def run(rank, world_size, args):
         _ = load_checkpoint(filename=params.checkpoint, model=model, strict=True)
     num_param = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of parameters : {num_param}")
+
+    if params.disable_aux_grad_penalties:
+        disable_aux_grad_penalties(model)
 
     model_avg: Optional[nn.Module] = None
     if rank == 0:
