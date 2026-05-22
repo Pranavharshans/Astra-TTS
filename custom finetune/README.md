@@ -9,6 +9,7 @@ Default experiment:
 - Dataset: LJSpeech 1.1
 - Fine-tune length: 30,000 steps
 - Output directory: `/workspace/astra_model_b_enhanced_ljspeech_ft_30k`
+- Safer defaults: `base_lr=0.0001`, `use_fp16=0`
 
 Run from the repo root on a GPU VM:
 
@@ -22,7 +23,7 @@ Useful overrides:
 ```bash
 num_iters=10000 bash "custom finetune/run_ljspeech_finetune_model_b_200k.sh"
 
-base_lr=0.0005 max_duration=100 bash "custom finetune/run_ljspeech_finetune_model_b_200k.sh"
+base_lr=0.0002 max_duration=100 use_fp16=0 bash "custom finetune/run_ljspeech_finetune_model_b_200k.sh"
 
 hf_repo=Praha-Labs/astra-tts-model-b-enhanced-250k \
 checkpoint_name=checkpoint-250000.pt \
