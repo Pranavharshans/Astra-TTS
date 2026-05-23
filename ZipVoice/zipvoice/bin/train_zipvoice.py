@@ -287,6 +287,16 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--disable-finetune-stochastic-modules",
+        type=str2bool,
+        default=False,
+        help="Disable scheduled dropout, stochastic skip, and constant-attention "
+        "training paths. This keeps the model in train mode but removes stochastic "
+        "fine-tune behavior that can create non-finite gradients on fragile "
+        "checkpoints.",
+    )
+
+    parser.add_argument(
         "--finetune-batch-count-offset",
         type=float,
         default=100000.0,
@@ -573,16 +583,6 @@ def disable_aux_grad_penalties(model: Union[nn.Module, DDP]) -> None:
     if isinstance(model, DDP):
         model = model.module
 
-    def zero_floatlike_attr(module: nn.Module, attr: str) -> None:
-        value = getattr(module, attr, None)
-        if isinstance(value, nn.Module):
-            if hasattr(value, "default"):
-                value.default = 0.0
-            if hasattr(value, "schedule"):
-                value.schedule = value.schedule * 0.0
-        elif value is not None:
-            setattr(module, attr, 0.0)
-
     num_balancers = 0
     num_whitens = 0
     for module in model.modules():
@@ -600,6 +600,48 @@ def disable_aux_grad_penalties(model: Union[nn.Module, DDP]) -> None:
     logging.info(
         f"Disabled auxiliary gradient penalties: "
         f"{num_balancers} Balancer modules, {num_whitens} Whiten modules"
+    )
+
+
+def zero_floatlike_attr(module: nn.Module, attr: str) -> bool:
+    value = getattr(module, attr, None)
+    if value is None:
+        return False
+    if isinstance(value, nn.Module):
+        if hasattr(value, "default"):
+            value.default = 0.0
+        if hasattr(value, "schedule"):
+            value.schedule = value.schedule * 0.0
+    else:
+        setattr(module, attr, 0.0)
+    return True
+
+
+def disable_finetune_stochastic_modules(model: Union[nn.Module, DDP]) -> None:
+    if isinstance(model, DDP):
+        model = model.module
+
+    attrs = (
+        "p",
+        "dropout_p",
+        "attention_skip_rate",
+        "conv_skip_rate",
+        "const_attention_rate",
+        "ff2_skip_rate",
+        "ff3_skip_rate",
+        "pos_emb_skip_rate",
+        "skip_rate",
+        "straight_through_rate",
+    )
+    changed = 0
+    for module in model.modules():
+        for attr in attrs:
+            if zero_floatlike_attr(module, attr):
+                changed += 1
+
+    logging.info(
+        "Disabled fine-tune stochastic modules by zeroing %s scheduled/dropout attrs",
+        changed,
     )
 
 
@@ -1185,6 +1227,8 @@ def run(rank, world_size, args):
 
     if params.disable_aux_grad_penalties:
         disable_aux_grad_penalties(model)
+    if params.disable_finetune_stochastic_modules:
+        disable_finetune_stochastic_modules(model)
 
     apply_module_trainability(
         model,
