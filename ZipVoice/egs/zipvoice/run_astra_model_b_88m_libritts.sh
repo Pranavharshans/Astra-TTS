@@ -18,7 +18,7 @@ num_iters=${num_iters:-400000}
 save_every_n=${save_every_n:-5000}
 max_duration=${max_duration:-300}
 accum_grad_batches=${accum_grad_batches:-1}
-base_lr=${base_lr:-0.04}
+base_lr=${base_lr:-0.02}
 exp_dir=${exp_dir:-/workspace/astra_model_b_enhanced_88m}
 
 if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
