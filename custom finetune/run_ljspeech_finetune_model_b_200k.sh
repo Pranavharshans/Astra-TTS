@@ -42,6 +42,9 @@ grad_clip="${grad_clip:-1.0}"
 finetune_checkpoint="${finetune_checkpoint:-${model_dir}/model-avg-${checkpoint_name}}"
 condition_drop_ratio="${condition_drop_ratio:-0.0}"
 disable_aux_grad_penalties="${disable_aux_grad_penalties:-1}"
+finetune_batch_count_offset="${finetune_batch_count_offset:-0}"
+freeze_modules="${freeze_modules:-}"
+unfreeze_modules="${unfreeze_modules:-embed,text_encoder,text_refinement}"
 
 ljspeech_url="${ljspeech_url:-https://data.keithito.com/data/speech/LJSpeech-1.1.tar.bz2}"
 ljspeech_archive="${raw_dir}/LJSpeech-1.1.tar.bz2"
@@ -177,6 +180,9 @@ if [ "${stage}" -le 6 ] && [ "${stop_stage}" -ge 6 ]; then
     --adamw-weight-decay "${adamw_weight_decay}" \
     --grad-clip "${grad_clip}" \
     --disable-aux-grad-penalties "${disable_aux_grad_penalties}" \
+    --finetune-batch-count-offset "${finetune_batch_count_offset}" \
+    --freeze-modules "${freeze_modules}" \
+    --unfreeze-modules "${unfreeze_modules}" \
     --num-iters "${num_iters}" \
     --save-every-n "${save_every_n}" \
     --max-duration "${max_duration}" \

@@ -271,6 +271,31 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--finetune-batch-count-offset",
+        type=float,
+        default=100000.0,
+        help="When --finetune=1, add this offset to the model's internal "
+        "batch_count schedule. Set to 0 for conservative fine-tuning from a "
+        "checkpoint without jumping directly into the late-training regime.",
+    )
+
+    parser.add_argument(
+        "--freeze-modules",
+        type=str,
+        default="",
+        help="Comma-separated top-level module names to freeze, e.g. "
+        "'fm_decoder,text_encoder'.",
+    )
+
+    parser.add_argument(
+        "--unfreeze-modules",
+        type=str,
+        default="",
+        help="Comma-separated top-level module names to train, freezing the rest, "
+        "e.g. 'embed,text_refinement'.",
+    )
+
+    parser.add_argument(
         "--save-every-n",
         type=int,
         default=5000,
@@ -562,6 +587,12 @@ def disable_aux_grad_penalties(model: Union[nn.Module, DDP]) -> None:
     )
 
 
+def parse_top_level_module_list(spec: str) -> List[str]:
+    if not spec:
+        return []
+    return [part.strip() for part in spec.split(",") if part.strip()]
+
+
 def train_one_epoch(
     params: AttributeDict,
     model: Union[nn.Module, DDP],
@@ -630,7 +661,11 @@ def train_one_epoch(
 
         if batch_idx % 10 == 0:
             if params.finetune:
-                set_batch_count(model, get_adjusted_batch_count(params) + 100000)
+                set_batch_count(
+                    model,
+                    get_adjusted_batch_count(params)
+                    + params.finetune_batch_count_offset,
+                )
             else:
                 set_batch_count(model, get_adjusted_batch_count(params))
 
@@ -977,6 +1012,8 @@ def run(rank, world_size, args):
     """
     params = get_params()
     params.update(vars(args))
+    params.freeze_modules = parse_top_level_module_list(params.freeze_modules)
+    params.unfreeze_modules = parse_top_level_module_list(params.unfreeze_modules)
     assert params.accum_grad_batches > 0, params.accum_grad_batches
     params.valid_interval = params.save_every_n
     # Set epoch to a large number to ignore it.
@@ -1058,6 +1095,8 @@ def run(rank, world_size, args):
                 model,
                 lr=params.base_lr,
                 include_names=True,
+                freeze_modules=params.freeze_modules,
+                unfreeze_modules=params.unfreeze_modules,
             ),
             lr=params.base_lr,  # should have no effect
             clipping_scale=2.0,
@@ -1069,6 +1108,8 @@ def run(rank, world_size, args):
                 model,
                 lr=params.base_lr,
                 include_names=False,
+                freeze_modules=params.freeze_modules,
+                unfreeze_modules=params.unfreeze_modules,
             ),
             lr=params.base_lr,
             weight_decay=params.adamw_weight_decay,
