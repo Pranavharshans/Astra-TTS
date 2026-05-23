@@ -593,6 +593,42 @@ def parse_top_level_module_list(spec: str) -> List[str]:
     return [part.strip() for part in spec.split(",") if part.strip()]
 
 
+def apply_module_trainability(
+    model: Union[nn.Module, DDP],
+    freeze_modules: List[str],
+    unfreeze_modules: List[str],
+) -> int:
+    if isinstance(model, DDP):
+        model = model.module
+
+    assert not (freeze_modules and unfreeze_modules)
+
+    num_trainable = 0
+    num_total = 0
+    for name, p in model.named_parameters():
+        top = name.split(".")[0]
+        trainable = True
+        if freeze_modules:
+            trainable = top not in freeze_modules
+        elif unfreeze_modules:
+            trainable = top in unfreeze_modules
+        p.requires_grad = trainable
+        num_total += p.numel()
+        if trainable:
+            num_trainable += p.numel()
+
+    logging.info(
+        "Trainable parameters: %s / %s (%.3f%%). freeze_modules=%s, "
+        "unfreeze_modules=%s",
+        num_trainable,
+        num_total,
+        100.0 * num_trainable / max(num_total, 1),
+        freeze_modules,
+        unfreeze_modules,
+    )
+    return num_trainable
+
+
 def train_one_epoch(
     params: AttributeDict,
     model: Union[nn.Module, DDP],
@@ -734,8 +770,9 @@ def train_one_epoch(
             if params.optimizer == "adamw":
                 if params.use_fp16:
                     scaler.unscale_(optimizer)
+                trainable_params = [p for p in model.parameters() if p.requires_grad]
                 grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(),
+                    trainable_params,
                     max_norm=params.grad_clip if params.grad_clip > 0 else float("inf"),
                     error_if_nonfinite=False,
                 )
@@ -1074,6 +1111,12 @@ def run(rank, world_size, args):
 
     if params.disable_aux_grad_penalties:
         disable_aux_grad_penalties(model)
+
+    apply_module_trainability(
+        model,
+        freeze_modules=params.freeze_modules,
+        unfreeze_modules=params.unfreeze_modules,
+    )
 
     model_avg: Optional[nn.Module] = None
     if rank == 0:
