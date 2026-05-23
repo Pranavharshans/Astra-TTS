@@ -18,6 +18,7 @@ stop_stage="${stop_stage:-6}"
 
 hf_repo="${hf_repo:-Praha-Labs/astra-tts-model-b-enhanced-200k}"
 checkpoint_name="${checkpoint_name:-checkpoint-200000.pt}"
+checkpoint_state="${checkpoint_state:-model_avg}"
 
 work_dir="${work_dir:-/workspace/astra_ljspeech_finetune}"
 data_dir="${data_dir:-${work_dir}/data}"
@@ -45,6 +46,8 @@ disable_aux_grad_penalties="${disable_aux_grad_penalties:-1}"
 finetune_batch_count_offset="${finetune_batch_count_offset:-0}"
 freeze_modules="${freeze_modules:-}"
 unfreeze_modules="${unfreeze_modules:-fm_decoder}"
+debug_nonfinite_grads="${debug_nonfinite_grads:-1}"
+max_nonfinite_grad_steps="${max_nonfinite_grad_steps:-5}"
 
 ljspeech_url="${ljspeech_url:-https://data.keithito.com/data/speech/LJSpeech-1.1.tar.bz2}"
 ljspeech_archive="${raw_dir}/LJSpeech-1.1.tar.bz2"
@@ -158,7 +161,14 @@ src = "${model_dir}/${checkpoint_name}"
 dst = "${finetune_checkpoint}"
 
 ckpt = torch.load(src, map_location="cpu", weights_only=False)
-if "model_avg" in ckpt and ckpt["model_avg"] is not None:
+requested = "${checkpoint_state}"
+if requested == "model_avg" and "model_avg" in ckpt and ckpt["model_avg"] is not None:
+    state = ckpt["model_avg"]
+    source = "model_avg"
+elif requested == "model":
+    state = ckpt["model"]
+    source = "model"
+elif "model_avg" in ckpt and ckpt["model_avg"] is not None:
     state = ckpt["model_avg"]
     source = "model_avg"
 else:
@@ -166,7 +176,8 @@ else:
     source = "model"
 
 torch.save({"model": state}, dst)
-print(f"Saved {dst} from {source}")
+print(f"Saved stripped weights-only checkpoint: {dst} from {source}")
+print("Removed keys:", sorted(k for k in ckpt.keys() if k != source))
 PY
 fi
 
@@ -183,6 +194,8 @@ if [ "${stage}" -le 6 ] && [ "${stop_stage}" -ge 6 ]; then
     --finetune-batch-count-offset "${finetune_batch_count_offset}" \
     --freeze-modules "${freeze_modules}" \
     --unfreeze-modules "${unfreeze_modules}" \
+    --debug-nonfinite-grads "${debug_nonfinite_grads}" \
+    --max-nonfinite-grad-steps "${max_nonfinite_grad_steps}" \
     --num-iters "${num_iters}" \
     --save-every-n "${save_every_n}" \
     --max-duration "${max_duration}" \

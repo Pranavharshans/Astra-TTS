@@ -192,6 +192,22 @@ def get_parser():
     )
 
     parser.add_argument(
+        "--debug-nonfinite-grads",
+        type=str2bool,
+        default=False,
+        help="When a non-finite gradient norm is detected, log parameter names "
+        "and finite/non-finite counts for the first offending trainable gradients.",
+    )
+
+    parser.add_argument(
+        "--max-nonfinite-grad-steps",
+        type=int,
+        default=0,
+        help="Abort after this many non-finite AdamW optimizer steps. Set 0 to "
+        "keep skipping indefinitely.",
+    )
+
+    parser.add_argument(
         "--lr-batches",
         type=float,
         default=7500,
@@ -629,6 +645,42 @@ def apply_module_trainability(
     return num_trainable
 
 
+def log_nonfinite_gradients(
+    model: Union[nn.Module, DDP],
+    max_items: int = 20,
+) -> None:
+    if isinstance(model, DDP):
+        model = model.module
+
+    logged = 0
+    for name, p in model.named_parameters():
+        if not p.requires_grad or p.grad is None:
+            continue
+        grad = p.grad.detach()
+        finite = torch.isfinite(grad)
+        if bool(finite.all()):
+            continue
+        numel = grad.numel()
+        finite_count = int(finite.sum().item())
+        logging.warning(
+            "Non-finite grad in %s: shape=%s dtype=%s finite=%s/%s "
+            "nan=%s inf=%s",
+            name,
+            tuple(grad.shape),
+            grad.dtype,
+            finite_count,
+            numel,
+            int(torch.isnan(grad).sum().item()),
+            int(torch.isinf(grad).sum().item()),
+        )
+        logged += 1
+        if logged >= max_items:
+            break
+
+    if logged == 0:
+        logging.warning("Non-finite grad norm detected, but no individual non-finite grad tensor was found.")
+
+
 def train_one_epoch(
     params: AttributeDict,
     model: Union[nn.Module, DDP],
@@ -678,6 +730,7 @@ def train_one_epoch(
     tot_loss = MetricsTracker()
 
     saved_bad_model = False
+    nonfinite_grad_steps = 0
     optimizer.zero_grad()
 
     def save_bad_model(suffix: str = ""):
@@ -761,6 +814,15 @@ def train_one_epoch(
 
             tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
 
+            if not torch.isfinite(loss):
+                logging.warning(
+                    "Skipping backward due to non-finite loss: %s, loss_info=%s",
+                    loss.detach().cpu().item(),
+                    loss_info,
+                )
+                optimizer.zero_grad()
+                continue
+
             scaler.scale(loss / params.accum_grad_batches).backward()
 
             is_accum_step = (batch_idx + 1) % params.accum_grad_batches == 0
@@ -777,13 +839,25 @@ def train_one_epoch(
                     error_if_nonfinite=False,
                 )
                 if not torch.isfinite(grad_norm):
+                    nonfinite_grad_steps += 1
                     logging.warning(
                         f"Skipping optimizer step due to non-finite grad norm: "
-                        f"{grad_norm}"
+                        f"{grad_norm} (count={nonfinite_grad_steps})"
                     )
+                    if params.debug_nonfinite_grads:
+                        log_nonfinite_gradients(model)
                     optimizer.zero_grad()
                     if params.use_fp16:
                         scaler.update()
+                    if (
+                        params.max_nonfinite_grad_steps > 0
+                        and nonfinite_grad_steps >= params.max_nonfinite_grad_steps
+                    ):
+                        save_bad_model(suffix="-nonfinite-grads")
+                        raise RuntimeError(
+                            "Too many non-finite AdamW gradient steps: "
+                            f"{nonfinite_grad_steps}"
+                        )
                     continue
 
             params.batch_idx_train += 1
