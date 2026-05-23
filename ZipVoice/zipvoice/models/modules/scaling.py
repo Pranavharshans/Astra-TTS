@@ -366,7 +366,7 @@ class BiasNormFunction(torch.autograd.Function):
             bias = bias.unsqueeze(-1)
         scales = (
             torch.mean((x - bias) ** 2, dim=channel_dim, keepdim=True)
-            .clamp(min=1.0e-1)
+            .clamp(min=5.0e-1)
             .rsqrt()
         ) * log_scale.exp()
         ans = x * scales
@@ -393,7 +393,7 @@ class BiasNormFunction(torch.autograd.Function):
             # recompute scales from x, bias and log_scale.
             scales = (
                 torch.mean((x - bias) ** 2, dim=ctx.channel_dim, keepdim=True)
-                .clamp(min=1.0e-1)
+                .clamp(min=5.0e-1)
                 .rsqrt()
             ) * log_scale.exp()
             ans = x * scales
@@ -464,7 +464,7 @@ class BiasNorm(torch.nn.Module):
                 bias = bias.unsqueeze(-1)
             scales = (
                 torch.mean((x - bias) ** 2, dim=channel_dim, keepdim=True)
-                .clamp(min=1.0e-1)
+                .clamp(min=5.0e-1)
                 .rsqrt()
             ) * self.log_scale.exp()
             return x * scales
