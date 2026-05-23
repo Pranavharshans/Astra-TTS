@@ -16,7 +16,8 @@ world_size=${world_size:-1}
 use_fp16=${use_fp16:-1}
 num_iters=${num_iters:-400000}
 save_every_n=${save_every_n:-5000}
-max_duration=${max_duration:-300}
+# 3090 24GB: 500s of audio per batch fills ~18-22GB with FP16
+max_duration=${max_duration:-500}
 accum_grad_batches=${accum_grad_batches:-1}
 base_lr=${base_lr:-0.02}
 exp_dir=${exp_dir:-/workspace/astra_model_b_enhanced_88m}
