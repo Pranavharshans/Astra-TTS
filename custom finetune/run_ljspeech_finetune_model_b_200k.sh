@@ -19,6 +19,11 @@ stop_stage="${stop_stage:-6}"
 hf_repo="${hf_repo:-Praha-Labs/astra-tts-model-b-enhanced-200k}"
 checkpoint_name="${checkpoint_name:-checkpoint-200000.pt}"
 checkpoint_state="${checkpoint_state:-model_avg}"
+checkpoint_step="${checkpoint_name#checkpoint-}"
+checkpoint_step="${checkpoint_step%.pt}"
+if [[ ! "${checkpoint_step}" =~ ^[0-9]+$ ]]; then
+  checkpoint_step=100000
+fi
 
 work_dir="${work_dir:-/workspace/astra_ljspeech_finetune}"
 data_dir="${data_dir:-${work_dir}/data}"
@@ -44,7 +49,10 @@ finetune_checkpoint="${finetune_checkpoint:-${model_dir}/model-avg-${checkpoint_
 condition_drop_ratio="${condition_drop_ratio:-0.0}"
 disable_aux_grad_penalties="${disable_aux_grad_penalties:-1}"
 disable_finetune_stochastic_modules="${disable_finetune_stochastic_modules:-1}"
-finetune_batch_count_offset="${finetune_batch_count_offset:-0}"
+disable_fused_activation_linear="${disable_fused_activation_linear:-1}"
+detect_anomaly="${detect_anomaly:-0}"
+inf_check="${inf_check:-0}"
+finetune_batch_count_offset="${finetune_batch_count_offset:-${checkpoint_step}}"
 freeze_modules="${freeze_modules:-}"
 unfreeze_modules="${unfreeze_modules:-fm_decoder}"
 debug_nonfinite_grads="${debug_nonfinite_grads:-1}"
@@ -193,6 +201,9 @@ if [ "${stage}" -le 6 ] && [ "${stop_stage}" -ge 6 ]; then
     --grad-clip "${grad_clip}" \
     --disable-aux-grad-penalties "${disable_aux_grad_penalties}" \
     --disable-finetune-stochastic-modules "${disable_finetune_stochastic_modules}" \
+    --disable-fused-activation-linear "${disable_fused_activation_linear}" \
+    --detect-anomaly "${detect_anomaly}" \
+    --inf-check "${inf_check}" \
     --finetune-batch-count-offset "${finetune_batch_count_offset}" \
     --freeze-modules "${freeze_modules}" \
     --unfreeze-modules "${unfreeze_modules}" \

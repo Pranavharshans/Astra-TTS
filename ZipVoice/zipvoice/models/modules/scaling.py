@@ -51,6 +51,13 @@ else:
 custom_fwd = custom_amp_decorator(custom_fwd, deprecated)
 custom_bwd = custom_amp_decorator(custom_bwd, deprecated)
 
+_activation_dropout_and_linear_fused = True
+
+
+def set_activation_dropout_and_linear_fused(enabled: bool) -> None:
+    global _activation_dropout_and_linear_fused
+    _activation_dropout_and_linear_fused = enabled
+
 
 def logaddexp_onnx(x: Tensor, y: Tensor) -> Tensor:
     max_value = torch.max(x, y)
@@ -1340,19 +1347,35 @@ class ActivationDropoutAndLinear(torch.nn.Module):
         self.dropout_p = dropout_p
         self.dropout_shared_dim = dropout_shared_dim
 
+    def _native_forward(self, x: Tensor):
+        if self.activation == "SwooshL":
+            x = SwooshLForward(x)
+        elif self.activation == "SwooshR":
+            x = SwooshRForward(x)
+        else:
+            assert False, self.activation
+
+        dropout_p = float(self.dropout_p)
+        if dropout_p != 0.0:
+            dropout_shape = list(x.shape)
+            if self.dropout_shared_dim is not None:
+                dropout_shape[self.dropout_shared_dim] = 1
+            dropout_mask = (1.0 / (1.0 - dropout_p)) * (
+                torch.rand(*dropout_shape, device=x.device, dtype=x.dtype) > dropout_p
+            )
+            x = x * dropout_mask
+
+        return torch.nn.functional.linear(x, self.weight, self.bias)
+
     def forward(self, x: Tensor):
         if (
+            not _activation_dropout_and_linear_fused
+            or
             torch.jit.is_scripting()
             or torch.jit.is_tracing()
             or "k2" not in sys.modules
         ):
-            if self.activation == "SwooshL":
-                x = SwooshLForward(x)
-            elif self.activation == "SwooshR":
-                x = SwooshRForward(x)
-            else:
-                assert False, self.activation
-            return torch.nn.functional.linear(x, self.weight, self.bias)
+            return self._native_forward(x)
 
         return ActivationDropoutAndLinearFunction.apply(
             x,

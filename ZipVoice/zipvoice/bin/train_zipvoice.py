@@ -40,6 +40,7 @@ import copy
 import json
 import logging
 import os
+from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 from shutil import copyfile
@@ -57,6 +58,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import zipvoice.utils.diagnostics as diagnostics
 from zipvoice.dataset.datamodule import TtsDataModule
+from zipvoice.models.modules.scaling import set_activation_dropout_and_linear_fused
 from zipvoice.models.zipvoice import ZipVoice
 from zipvoice.tokenizer.tokenizer import (
     EmiliaTokenizer,
@@ -294,6 +296,24 @@ def get_parser():
         "training paths. This keeps the model in train mode but removes stochastic "
         "fine-tune behavior that can create non-finite gradients on fragile "
         "checkpoints.",
+    )
+
+    parser.add_argument(
+        "--disable-fused-activation-linear",
+        type=str2bool,
+        default=False,
+        help="Bypass the memory-efficient fused Swoosh/dropout/linear custom "
+        "backward and use native PyTorch autograd. This is slower but useful for "
+        "debugging or fine-tuning checkpoints that produce finite forward loss "
+        "and non-finite gradients.",
+    )
+
+    parser.add_argument(
+        "--detect-anomaly",
+        type=str2bool,
+        default=False,
+        help="Enable torch autograd anomaly detection around backward(). It is "
+        "slow, but it reports the first autograd operation that creates NaN/Inf.",
     )
 
     parser.add_argument(
@@ -844,28 +864,35 @@ def train_one_epoch(
         )
 
         try:
-            with torch_autocast(dtype=torch.float16, enabled=params.use_fp16):
-                loss, loss_info = compute_fbank_loss(
-                    params=params,
-                    model=model,
-                    features=features,
-                    features_lens=features_lens,
-                    tokens=tokens,
-                    is_training=True,
-                )
+            anomaly_context = (
+                torch.autograd.detect_anomaly()
+                if params.detect_anomaly
+                else nullcontext()
+            )
+            with anomaly_context:
+                with torch_autocast(dtype=torch.float16, enabled=params.use_fp16):
+                    loss, loss_info = compute_fbank_loss(
+                        params=params,
+                        model=model,
+                        features=features,
+                        features_lens=features_lens,
+                        tokens=tokens,
+                        is_training=True,
+                    )
 
-            tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
+                tot_loss = (tot_loss * (1 - 1 / params.reset_interval)) + loss_info
 
-            if not torch.isfinite(loss):
-                logging.warning(
-                    "Skipping backward due to non-finite loss: %s, loss_info=%s",
-                    loss.detach().cpu().item(),
-                    loss_info,
-                )
-                optimizer.zero_grad()
-                continue
+                if not torch.isfinite(loss):
+                    logging.warning(
+                        "Skipping backward due to non-finite loss: %s, loss_info=%s",
+                        loss.detach().cpu().item(),
+                        loss_info,
+                    )
+                    optimizer.zero_grad()
+                    continue
 
-            scaler.scale(loss / params.accum_grad_batches).backward()
+                scaled_loss = scaler.scale(loss / params.accum_grad_batches)
+                scaled_loss.backward()
 
             is_accum_step = (batch_idx + 1) % params.accum_grad_batches == 0
             if not is_accum_step:
@@ -1211,6 +1238,10 @@ def run(rank, world_size, args):
     params.update(tokenizer_config)
 
     logging.info(params)
+
+    if params.disable_fused_activation_linear:
+        set_activation_dropout_and_linear_fused(False)
+        logging.info("Disabled fused ActivationDropoutAndLinear custom backward")
 
     logging.info("About to create model")
 
