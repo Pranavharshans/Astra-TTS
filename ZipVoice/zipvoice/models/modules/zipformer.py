@@ -475,6 +475,9 @@ class TTSZipformer(nn.Module):
         else:
             time_emb = None
 
+        import logging
+        _fm_logger = logging.getLogger(__name__)
+
         attn_mask = None
 
         for i, module in enumerate(self.encoders):
@@ -492,6 +495,7 @@ class TTSZipformer(nn.Module):
             if cached is not None:
                 x = cached
             else:
+                _pre = x
                 x = module(
                     x,
                     time_emb=time_emb,
@@ -500,6 +504,20 @@ class TTSZipformer(nn.Module):
                 )
                 if use_cache:
                     smooth_cache_state.setdefault("values", {})[i] = x.detach()
+                if self.training and not torch.isfinite(x).all():
+                    _x_fn = x.isfinite()
+                    _bad = int((~_x_fn).sum().item())
+                    _total = _x_fn.numel()
+                    _pre_bad = int((~_pre.isfinite()).sum().item()) if not torch.isfinite(_pre).all() else 0
+                    _fm_logger.warning(
+                        "TTSZipformer stack %d output: %d/%d non-finite values "
+                        "(input had %d non-finite). x min=%.4f max=%.4f mean=%.4f std=%.4f",
+                        i, _bad, _total, _pre_bad,
+                        x[torch.isfinite(x)].min().item(),
+                        x[torch.isfinite(x)].max().item(),
+                        x[torch.isfinite(x)].mean().item(),
+                        x[torch.isfinite(x)].std().item(),
+                    )
         x = self.out_proj(x)
         x = x.permute(1, 0, 2)
         return x

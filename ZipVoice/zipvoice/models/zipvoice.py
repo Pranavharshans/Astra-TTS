@@ -441,6 +441,19 @@ class ZipVoice(nn.Module):
         xt = features * t + noise * (1 - t)
         ut = features - noise  # (B, T, F)
 
+        if self.training:
+            import logging
+            _fw_logger = logging.getLogger(__name__)
+            for _name, _tensor in [("features", features), ("noise", noise),
+                                     ("text_condition", text_condition),
+                                     ("speech_condition", speech_condition),
+                                     ("xt", xt), ("ut", ut)]:
+                if not torch.isfinite(_tensor).all():
+                    _bad = int((~_tensor.isfinite()).sum().item())
+                    _fw_logger.warning(
+                        "ZipVoice.forward input '%s': %d/%d non-finite", _name, _bad, _tensor.numel()
+                    )
+
         vt = self.forward_fm_decoder(
             t=t,
             xt=xt,
