@@ -889,6 +889,7 @@ def train_one_epoch(
                         loss_info,
                     )
                     optimizer.zero_grad()
+                    torch.cuda.empty_cache()
                     continue
 
                 scaled_loss = scaler.scale(loss / params.accum_grad_batches)
@@ -946,7 +947,11 @@ def train_one_epoch(
             optimizer.zero_grad()
         except Exception as e:
             logging.info(f"Caught exception : {e}.")
-            save_bad_model()
+            torch.cuda.empty_cache()
+            try:
+                save_bad_model()
+            except Exception as save_err:
+                logging.warning(f"Could not save bad model: {save_err}")
             raise
 
         if params.print_diagnostics and batch_idx == 5:
