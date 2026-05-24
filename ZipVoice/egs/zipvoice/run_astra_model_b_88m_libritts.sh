@@ -22,6 +22,8 @@ max_duration=${max_duration:-350}
 accum_grad_batches=${accum_grad_batches:-2}
 base_lr=${base_lr:-0.02}
 exp_dir=${exp_dir:-/workspace/astra_model_b_enhanced_88m}
+start_epoch=${start_epoch:-1}
+checkpoint=${checkpoint:-}
 
 if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
       echo "Stage 1: Data Preparation for LibriTTS dataset"
@@ -30,6 +32,13 @@ fi
 
 if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
       echo "Stage 2: Train Astra-TTS Model B Enhanced 88M"
+      extra_args=()
+      if [ "${start_epoch}" -gt 1 ]; then
+          extra_args+=(--start-epoch "${start_epoch}")
+      fi
+      if [ -n "${checkpoint}" ]; then
+          extra_args+=(--checkpoint "${checkpoint}")
+      fi
       python3 -m zipvoice.bin.train_zipvoice \
             --world-size ${world_size} \
             --use-fp16 ${use_fp16} \
@@ -46,7 +55,8 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
             --token-file data/tokens_libritts.txt \
             --dataset libritts \
             --manifest-dir data/fbank \
-            --exp-dir ${exp_dir}
+            --exp-dir ${exp_dir} \
+            "${extra_args[@]}"
 fi
 
 if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
